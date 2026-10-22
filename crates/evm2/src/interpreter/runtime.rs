@@ -6,7 +6,7 @@ use crate::{
     EvmTypesHost, ExecutionConfig, ExecutionError, HostError, SpecId, Version,
     bytecode::Bytecode,
     env::TxEnv,
-    evm::inspector::Inspector,
+    evm::inspector::{Inspector, OpcodeSet},
     interpreter::dispatch,
     trustme,
     version::{EvmFeatures, GasParams},
@@ -34,6 +34,7 @@ pub struct Interpreter<'frame, 'host, T: EvmTypesHost> {
     message: Option<&'frame Message<T>>,
     host: Option<NonNull<T::Host<'host>>>,
     inspector: Option<NonNull<dyn Inspector<T> + 'host>>,
+    pub(in crate::interpreter) step_opcodes: OpcodeSet,
     pub(in crate::interpreter) stack_len: usize,
     #[derive_where(skip)]
     pub(in crate::interpreter) stack: Box<StackBacking>,
@@ -94,6 +95,7 @@ impl<'frame, 'host, T: EvmTypesHost> Interpreter<'frame, 'host, T> {
             return_data: Bytes::new(),
             host: None,
             inspector: None,
+            step_opcodes: OpcodeSet::ALL,
             spec: SpecId::DEFAULT,
             features: EvmFeatures::empty(),
             // SAFETY: `MaybeUninit<Word>` does not need initialization.
@@ -408,7 +410,7 @@ impl<'frame, 'host, T: EvmTypesHost> Interpreter<'frame, 'host, T> {
     /// Runs the interpreter until it stops.
     #[inline]
     pub fn run(&mut self, host: &mut T::Host<'host>) -> Result<InstrStop, ExecutionError> {
-        self.run_inner(host, None)
+        self.run_inner(host, None, OpcodeSet::ALL)
     }
 
     /// Runs the interpreter until it stops with an execution inspector.
@@ -418,7 +420,8 @@ impl<'frame, 'host, T: EvmTypesHost> Interpreter<'frame, 'host, T> {
         host: &mut T::Host<'host>,
         inspector: &mut (dyn Inspector<T> + 'host),
     ) -> Result<InstrStop, ExecutionError> {
-        self.run_inner(host, Some(NonNull::from(inspector)))
+        let step_opcodes = inspector.step_opcodes();
+        self.run_inner(host, Some(NonNull::from(inspector)), step_opcodes)
     }
 
     /// Prepares this interpreter for external execution.
@@ -446,9 +449,11 @@ impl<'frame, 'host, T: EvmTypesHost> Interpreter<'frame, 'host, T> {
         &mut self,
         host: &mut T::Host<'host>,
         inspector: Option<NonNull<dyn Inspector<T> + 'host>>,
+        step_opcodes: OpcodeSet,
     ) -> Result<InstrStop, ExecutionError> {
         self.prepare_run(host);
         self.inspector = inspector;
+        self.step_opcodes = step_opcodes;
 
         let stop = if self.error.is_some() {
             InstrStop::FatalExternalError
@@ -459,7 +464,7 @@ impl<'frame, 'host, T: EvmTypesHost> Interpreter<'frame, 'host, T> {
             let config = unsafe { self.execution_config_detached() };
             let instructions =
                 if inspector.is_some() { config.inspect_instructions } else { config.instructions };
-            dispatch::run(self, instructions)
+            dispatch::run(self, instructions, config.instructions)
         };
         self.finish_run(stop)
     }

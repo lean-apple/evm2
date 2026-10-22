@@ -107,6 +107,13 @@ pub trait Inspector<T: EvmTypesHost>: NonStaticAny {
         let _ = value;
         let _ = host;
     }
+
+    /// The opcodes whose [`step`](Self::step) and [`step_end`](Self::step_end) this inspector
+    /// observes. Read once per frame; other opcodes run on the uninspected fast path.
+    #[inline]
+    fn step_opcodes(&self) -> OpcodeSet {
+        OpcodeSet::ALL
+    }
 }
 
 #[inline]
@@ -139,9 +146,54 @@ impl<'a, T: EvmTypesHost> core::ops::DerefMut for dyn Inspector<T> + 'a {
     }
 }
 
+/// A set of opcodes, one bit each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpcodeSet([u64; 4]);
+
+impl OpcodeSet {
+    /// Every opcode.
+    pub const ALL: Self = Self([u64::MAX; 4]);
+    /// No opcode.
+    pub const NONE: Self = Self([0; 4]);
+
+    /// This set with `op` added.
+    #[inline]
+    #[must_use]
+    pub const fn with(mut self, op: u8) -> Self {
+        self.0[(op >> 6) as usize] |= 1 << (op & 63);
+        self
+    }
+
+    /// Whether `op` is in the set.
+    #[inline(always)]
+    #[must_use]
+    pub const fn contains(&self, op: u8) -> bool {
+        self.0[(op >> 6) as usize] & (1 << (op & 63)) != 0
+    }
+
+    /// Whether every opcode is in the set.
+    #[inline]
+    #[must_use]
+    pub fn is_all(&self) -> bool {
+        *self == Self::ALL
+    }
+
+    /// Each opcode's entry from `inside` when the opcode is in the set, from `outside` otherwise.
+    #[must_use]
+    pub fn select<E: Copy>(&self, inside: &[E; 256], outside: &[E; 256]) -> [E; 256] {
+        let mut selected = *outside;
+        for op in 0..=u8::MAX {
+            if self.contains(op) {
+                selected[op as usize] = inside[op as usize];
+            }
+        }
+        selected
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Inspector;
+    use super::*;
     use crate::{
         BaseEvmTypes, DatabaseError, Evm, EvmTypesHost, Precompiles, SpecId,
         bytecode::Bytecode,
@@ -1640,6 +1692,78 @@ mod tests {
 
             assert_eq!(stop, Ok(expected));
             assert_eq!(interp.gas().remaining(), 1000);
+        }
+    }
+
+    #[test]
+    fn step_opcodes_limit_the_inspected_steps_without_changing_gas() {
+        /// Records each inspected opcode with the gas left before and after it.
+        struct Steps {
+            opcodes: OpcodeSet,
+            seen: Vec<(u8, u64, u64)>,
+        }
+
+        impl<T: EvmTypesHost> Inspector<T> for Steps {
+            fn step_opcodes(&self) -> OpcodeSet {
+                self.opcodes
+            }
+
+            fn step(&mut self, interp: &mut Interpreter<'_, '_, T>) {
+                self.seen.push((interp.opcode(), interp.gas().remaining(), 0));
+            }
+
+            fn step_end(&mut self, interp: &mut Interpreter<'_, '_, T>) {
+                if let Some(last) = self.seen.last_mut() {
+                    last.2 = interp.gas().remaining();
+                }
+            }
+        }
+
+        let code = Vec::from([
+            op::PUSH1,
+            1,
+            op::PUSH1,
+            2,
+            op::ADD,
+            op::PUSH1,
+            3,
+            op::ADD,
+            op::POP,
+            op::STOP,
+        ]);
+        let run = |opcodes| {
+            run_evm_with_inspector(
+                code.clone(),
+                &MessageExt::default(),
+                10_000,
+                Steps { opcodes, seen: Vec::new() },
+            )
+        };
+        let (all_result, all, _) = run(OpcodeSet::ALL);
+        let (add_result, add, _) = run(OpcodeSet::NONE.with(op::ADD));
+
+        let all_adds =
+            all.seen.iter().copied().filter(|(op, ..)| *op == op::ADD).collect::<Vec<_>>();
+        assert_eq!(add.seen, all_adds, "only ADD is inspected, with the same gas around it");
+        assert_eq!(add.seen.len(), 2);
+        assert_eq!(add_result.stop, InstrStop::Stop);
+        assert_eq!(add_result.gas.remaining(), all_result.gas.remaining());
+    }
+
+    #[test]
+    fn opcode_set_selects_inside_entries_for_its_opcodes() {
+        let inside = core::array::from_fn::<_, 256, _>(|op| op + 1000);
+        let outside = core::array::from_fn::<_, 256, _>(|op| op);
+
+        let selected = OpcodeSet::NONE.with(op::ADD).with(op::SSTORE).select(&inside, &outside);
+
+        for op in 0..256 {
+            let expected = if op == op::ADD as usize || op == op::SSTORE as usize {
+                inside[op]
+            } else {
+                outside[op]
+            };
+            assert_eq!(selected[op], expected);
         }
     }
 }

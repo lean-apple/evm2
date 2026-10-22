@@ -1,6 +1,6 @@
 use super::{DynInspector, InspectMode, NoInspector, inc_pc, run_state};
 use crate::{
-    EvmConfig, EvmTypesHost,
+    EvmConfig, EvmTypesHost, OpcodeSet,
     interpreter::{InstrStop, Interpreter, InterpreterState, Pc, RawStack, Result, StackMut},
 };
 use core::hint::cold_path;
@@ -139,12 +139,14 @@ fn dispatch_inner<T: EvmTypesHost, C: EvmConfig<T>, M: InspectMode<T>, G: Dispat
 pub(in crate::interpreter) fn run<T: EvmTypesHost>(
     interpreter: &mut Interpreter<'_, '_, T>,
     instructions: &RawInstrTable<T>,
+    plain: &RawInstrTable<T>,
 ) -> InstrStop {
+    let step_opcodes = interpreter.step_opcodes;
     let (state, pc, stack) = run_state(interpreter);
     if state.is_inspecting() {
-        return run_inner::<T, DynInspector>(state, pc, stack, instructions);
+        return run_inner::<T, DynInspector>(state, pc, stack, instructions, plain, step_opcodes);
     }
-    run_inner::<T, NoInspector>(state, pc, stack, instructions)
+    run_inner::<T, NoInspector>(state, pc, stack, instructions, plain, step_opcodes)
 }
 
 #[allow(clippy::let_unit_value)]
@@ -153,11 +155,15 @@ fn run_inner<T: EvmTypesHost, M: InspectMode<T>>(
     pc: Pc,
     mut stack: RawStack<'_>,
     instructions: &RawInstrTable<T>,
+    plain: &RawInstrTable<T>,
+    step_opcodes: OpcodeSet,
 ) -> InstrStop {
     let mut loop_state = imp::loop_state(state.gas_mut());
     let mut cursor = imp::Cursor::new(pc, stack.len());
     loop {
-        if M::INSPECT {
+        // An opcode outside the inspector's set runs from the uninspected table, unhooked.
+        let inspect = M::INSPECT && step_opcodes.contains(cursor.pc().op());
+        if inspect {
             imp::sync_loop_state(state, loop_state);
             M::step(state, cursor.pc(), cursor.stack_len());
             loop_state = imp::loop_state(state.gas_mut());
@@ -167,14 +173,14 @@ fn run_inner<T: EvmTypesHost, M: InspectMode<T>>(
         }
 
         let op = cursor.pc().op();
-        let instr = instructions[op as usize];
+        let instr = if inspect { instructions[op as usize] } else { plain[op as usize] };
         cursor = {
             // SAFETY: This is the only stack borrow outside inspector callbacks.
             let stack_view = unsafe { stack.borrow() };
             imp::dispatch_loop_call(instr, cursor, stack_view.stack, state, &mut loop_state)
         };
 
-        if M::INSPECT {
+        if inspect {
             imp::sync_loop_state(state, loop_state);
             M::step_end(state, cursor.pc(), cursor.stack_len());
             loop_state = imp::loop_state(state.gas_mut());

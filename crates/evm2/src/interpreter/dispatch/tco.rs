@@ -30,7 +30,15 @@ pub(super) type RawInstrTable<T> = TailInstrTable<T>;
 pub(in crate::interpreter) fn run<T: EvmTypesHost>(
     interpreter: &mut Interpreter<'_, '_, T>,
     instructions: &RawInstrTable<T>,
+    plain: &RawInstrTable<T>,
 ) -> InstrStop {
+    let filtered;
+    let instructions = if interpreter.step_opcodes.is_all() {
+        instructions
+    } else {
+        filtered = interpreter.step_opcodes.select(instructions, plain);
+        &filtered
+    };
     let remaining_gas = RemainingGas::new(interpreter.gas.remaining());
     let (state, pc, stack) = run_state(interpreter);
     let op = pc.op();
@@ -56,6 +64,8 @@ extern_table! {
         let instr: InstructionImplFn<T> = instruction.instr;
         let dynamic_gas = instruction.dynamic_gas;
         if M::INSPECT {
+            // The previous opcode may have run uninspected, keeping gas in the register only.
+            state.gas_mut().set_remaining(remaining_gas.get());
             M::step(state, pc, stack.len());
             remaining_gas.set(state.gas_mut().remaining());
             if state.result().is_err() {
