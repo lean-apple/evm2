@@ -1,11 +1,12 @@
 use super::{InspectMode, run_state};
 use crate::{
-    EvmConfig, EvmTypesHost,
+    EvmConfig, EvmTypesHost, OpcodeSet,
     interpreter::{
         InstrStop, Interpreter, InterpreterState, Pc, RawStack, Result, gas::RemainingGas,
         private::InstructionImplFn,
     },
 };
+use alloc::boxed::Box;
 use core::hint::cold_path;
 
 /// Tail instruction function pointer.
@@ -26,19 +27,36 @@ pub(super) type RawInstrFn<T> = TailInstrFn<T>;
 
 pub(super) type RawInstrTable<T> = TailInstrTable<T>;
 
+/// A table filtered to an inspector's opcodes, with the opcodes and the inspected table it was
+/// built from.
+pub(in crate::interpreter) type FilteredTable<T> =
+    (OpcodeSet, *const RawInstrTable<T>, RawInstrTable<T>);
+
 #[inline(always)]
 pub(in crate::interpreter) fn run<T: EvmTypesHost>(
     interpreter: &mut Interpreter<'_, '_, T>,
     instructions: &RawInstrTable<T>,
     plain: &RawInstrTable<T>,
 ) -> InstrStop {
-    let filtered;
-    let instructions = if interpreter.step_opcodes.is_all() {
-        instructions
-    } else {
-        filtered = interpreter.step_opcodes.select(instructions, plain);
-        &filtered
+    if interpreter.step_opcodes.is_all() {
+        return run_table(interpreter, instructions);
+    }
+    // Reuse the table this pooled frame built last, unless its opcodes or inspected table changed.
+    let (step_opcodes, inspected) = (interpreter.step_opcodes, core::ptr::from_ref(instructions));
+    let filtered = match interpreter.filtered_instructions.take() {
+        Some(filtered) if filtered.0 == step_opcodes && filtered.1 == inspected => filtered,
+        _ => Box::new((step_opcodes, inspected, step_opcodes.select(instructions, plain))),
     };
+    let stop = run_table(interpreter, &filtered.2);
+    interpreter.filtered_instructions = Some(filtered);
+    stop
+}
+
+#[inline(always)]
+fn run_table<T: EvmTypesHost>(
+    interpreter: &mut Interpreter<'_, '_, T>,
+    instructions: &RawInstrTable<T>,
+) -> InstrStop {
     let remaining_gas = RemainingGas::new(interpreter.gas.remaining());
     let (state, pc, stack) = run_state(interpreter);
     let op = pc.op();

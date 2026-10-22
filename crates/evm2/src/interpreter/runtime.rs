@@ -35,6 +35,11 @@ pub struct Interpreter<'frame, 'host, T: EvmTypesHost> {
     host: Option<NonNull<T::Host<'host>>>,
     inspector: Option<NonNull<dyn Inspector<T> + 'host>>,
     pub(in crate::interpreter) step_opcodes: OpcodeSet,
+    /// The filtered dispatch table last built for these opcodes over that inspected table, kept
+    /// so a pooled frame reruns without rebuilding it.
+    #[cfg(tco)]
+    #[derive_where(skip)]
+    pub(in crate::interpreter) filtered_instructions: Option<Box<dispatch::FilteredTable<T>>>,
     pub(in crate::interpreter) stack_len: usize,
     #[derive_where(skip)]
     pub(in crate::interpreter) stack: Box<StackBacking>,
@@ -96,6 +101,8 @@ impl<'frame, 'host, T: EvmTypesHost> Interpreter<'frame, 'host, T> {
             host: None,
             inspector: None,
             step_opcodes: OpcodeSet::ALL,
+            #[cfg(tco)]
+            filtered_instructions: None,
             spec: SpecId::DEFAULT,
             features: EvmFeatures::empty(),
             // SAFETY: `MaybeUninit<Word>` does not need initialization.

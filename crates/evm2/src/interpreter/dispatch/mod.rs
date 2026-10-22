@@ -20,6 +20,9 @@ core::cfg_select! {
 
 pub(in crate::interpreter) use imp::run;
 
+#[cfg(tco)]
+pub(in crate::interpreter) use imp::FilteredTable;
+
 #[inline(always)]
 fn run_state<'a, 'frame, 'host, T: EvmTypesHost>(
     interpreter: &'a mut Interpreter<'frame, 'host, T>,

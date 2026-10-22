@@ -1740,7 +1740,7 @@ mod tests {
             )
         };
         let (all_result, all, _) = run(OpcodeSet::ALL);
-        let (add_result, add, _) = run(OpcodeSet::NONE.with(op::ADD));
+        let (add_result, add, mut evm) = run(OpcodeSet::NONE.with(op::ADD));
 
         let all_adds =
             all.seen.iter().copied().filter(|(op, ..)| *op == op::ADD).collect::<Vec<_>>();
@@ -1748,6 +1748,14 @@ mod tests {
         assert_eq!(add.seen.len(), 2);
         assert_eq!(add_result.stop, InstrStop::Stop);
         assert_eq!(add_result.gas.remaining(), all_result.gas.remaining());
+
+        // The same EVM reuses its pooled frame, which must not keep the ADD-only table.
+        evm.set_inspector(Steps { opcodes: OpcodeSet::NONE.with(op::POP), seen: Vec::new() });
+        let mut message =
+            MessageExt { gas_limit: 10_000, code: legacy_bytecode(code), ..Default::default() };
+        Host::execute_message(&mut evm, &TxEnvExt::default(), &mut message).unwrap();
+        let pop = evm.clear_inspector_as::<Steps>().unwrap();
+        assert_eq!(pop.seen.iter().map(|(op, ..)| *op).collect::<Vec<_>>(), [op::POP]);
     }
 
     #[test]
